@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Binder</title>
+  <meta name="description" content="Scan Pokémon cards and track what they are worth.">
+  <meta name="theme-color" content="#E6EBEE" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12171C" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Binder">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Binder</h1>
+    <button id="settingsBtn" class="icon-btn" type="button" aria-label="Settings">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6 1.7 1.7 0 0 0 9.97 3.04V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <section class="summary" aria-live="polite">
+      <p class="summary-label">Collection value</p>
+      <p class="total" id="total">–</p>
+      <p class="change" id="change"></p>
+      <p class="meta"><span id="meta"></span> <button id="refreshBtn" class="text-btn" type="button">Refresh prices</button></p>
+    </section>
+
+    <section class="toolbar" id="toolbar">
+      <input type="search" id="filter" placeholder="Find a card" autocomplete="off" aria-label="Find a card">
+      <div class="seg" role="group" aria-label="Sort cards">
+        <button type="button" data-sort="value">Value</button>
+        <button type="button" data-sort="newest">Newest</button>
+        <button type="button" data-sort="name">Name</button>
+      </div>
+    </section>
+
+    <section id="grid" class="grid" aria-label="Your cards"></section>
+
+    <section id="empty" class="empty" hidden>
+      <h2>Your binder is empty</h2>
+      <p id="emptyText">Take a photo of one or more cards and they'll show up here with their current price.</p>
+    </section>
+  </main>
+
+  <nav class="actions" aria-label="Add cards">
+    <label class="btn primary">
+      <input class="vh" type="file" accept="image/*" capture="environment" id="cameraInput">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      Take photo
+    </label>
+    <label class="btn">
+      <input class="vh" type="file" accept="image/*" multiple id="uploadInput">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="m4 16 4.5-4.5 3.5 3.5 2.5-2.5L20 18"/><circle cx="15.5" cy="9.5" r="1.4" fill="currentColor"/></svg>
+      Upload photos
+    </label>
+  </nav>
+
+  <dialog id="review" class="sheet" aria-labelledby="reviewTitle">
+    <div class="sheet-head">
+      <h2 id="reviewTitle">Check the cards</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body" id="reviewBody"></div>
+    <div class="sheet-foot">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="saveReview" disabled>Add cards</button>
+    </div>
+  </dialog>
+
+  <dialog id="detail" class="sheet" aria-labelledby="detailTitle">
+    <div class="sheet-head">
+      <h2 id="detailTitle">Card</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body" id="detailBody"></div>
+  </dialog>
+
+  <dialog id="settings" class="sheet" aria-labelledby="settingsTitle">
+    <div class="sheet-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <p class="notice" id="settingsNotice" hidden></p>
+
+      <div class="field">
+        <label for="apiKey">Anthropic API key</label>
+        <div class="key-row">
+          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+          <button type="button" class="btn small" id="toggleKey">Show</button>
+        </div>
+        <p class="hint">Stored only on this device. Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.</p>
+      </div>
+
+      <div class="field">
+        <label for="model">Model for reading cards</label>
+        <select id="model"></select>
+      </div>
+
+      <div class="field">
+        <label for="currency">Show prices in</label>
+        <select id="currency">
+          <option value="SEK">Swedish kronor (SEK)</option>
+          <option value="EUR">Euro (EUR)</option>
+          <option value="USD">US dollars (USD)</option>
+        </select>
+        <p class="hint">Prices come from Cardmarket (EUR) and TCGplayer (USD) via TCGdex, converted with daily ECB rates.</p>
+      </div>
+
+      <div class="field">
+        <span class="label">Backup</span>
+        <p class="hint">Your cards and photos live in this browser only. Save a backup now and then.</p>
+        <div class="btn-row">
+          <button type="button" class="btn" id="exportBtn">Save backup</button>
+          <label class="btn">
+            <input class="vh" type="file" accept="application/json,.json" id="importInput">
+            Restore backup
+          </label>
+        </div>
+        <p class="hint" id="storageInfo"></p>
+      </div>
+
+      <div class="field">
+        <button type="button" class="btn danger" id="wipeBtn">Delete all cards and photos</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
