@@ -120,7 +120,22 @@
           <option value="EUR">Euro (EUR)</option>
           <option value="USD">US dollars (USD)</option>
         </select>
-        <p class="hint">Prices come from Cardmarket (EUR) and TCGplayer (USD) via TCGdex, converted with daily ECB rates.</p>
+        <p class="hint" id="ratesInfo"></p>
+      </div>
+
+      <div class="field">
+        <label for="basis">Base card values on</label>
+        <select id="basis">
+          <option value="tcgplayer">TCGplayer (US market, most reliable matching)</option>
+          <option value="cardmarket">Cardmarket (European market)</option>
+        </select>
+        <p class="hint">You can also pick a different price for a single card in its detail view.</p>
+      </div>
+
+      <div class="field">
+        <label for="ptcgKey">Pokémon TCG API key (optional)</label>
+        <input id="ptcgKey" type="text" autocomplete="off" spellcheck="false" placeholder="Only needed for very large collections">
+        <p class="hint">Free at <a href="https://dev.pokemontcg.io" target="_blank" rel="noopener">dev.pokemontcg.io</a>. Raises the daily price lookup limit.</p>
       </div>
 
       <div class="field">

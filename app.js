@@ -4,7 +4,13 @@
 
 const TCG = 'https://api.tcgdex.net/v2/en';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const RATES_URL = 'https://api.frankfurter.app/latest?from=EUR&to=SEK,USD';
+const PTCG = 'https://api.pokemontcg.io/v2';
+const RATE_SOURCES = [
+  ['https://api.frankfurter.dev/v1/latest?base=EUR&symbols=SEK,USD', r => r.rates],
+  ['https://api.frankfurter.app/latest?from=EUR&to=SEK,USD', r => r.rates],
+  ['https://open.er-api.com/v6/latest/EUR', r => r.rates],
+];
+const FALLBACK_RATES = { SEK: 11.0, USD: 1.16 };
 
 const MODELS = [
   ['claude-sonnet-5', 'Claude Sonnet 5 (recommended)'],
@@ -18,6 +24,13 @@ const MAX_HISTORY = 120;
 const IMG_MAX = 1568;
 
 const VARIANT_LABEL = { normal: 'Normal', holo: 'Holo', reverse: 'Reverse holo', firstEdition: '1st edition' };
+const SOURCE_LABEL = {
+  tp: 'TCGplayer market',
+  cm: 'Cardmarket trend',
+  dexCm: 'Cardmarket trend (TCGdex)',
+  dexTp: 'TCGplayer market (TCGdex)',
+};
+const CM_STALE_MS = 30 * 86400e3;  // skip Cardmarket numbers older than this in automatic mode
 
 const SYSTEM_PROMPT = `You identify Pokémon trading cards in photos for a collection app.
 Return ONLY a JSON object, with no prose and no code fences, in this shape:
@@ -135,7 +148,7 @@ function relTime(ts) {
 
 const SETTINGS_KEY = 'binder.settings';
 const settings = Object.assign(
-  { apiKey: '', model: MODELS[0][0], currency: 'SEK', sort: 'value' },
+  { apiKey: '', ptcgKey: '', model: MODELS[0][0], currency: 'SEK', sort: 'value', basis: 'tcgplayer' },
   safeParse(localStorage.getItem(SETTINGS_KEY))
 );
 function saveSettings() {
@@ -145,21 +158,25 @@ function saveSettings() {
 /* ================= Currency ================= */
 
 let rates = safeParse(localStorage.getItem('binder.rates'));
+if (!rates.SEK || !rates.USD) rates = { at: 0, ...FALLBACK_RATES, live: false };
 
-async function loadRates() {
-  if (rates.at && Date.now() - rates.at < 12 * 3600e3) return;
-  try {
-    const r = await getJSON(RATES_URL, {}, 10000);
-    rates = { at: Date.now(), SEK: r.rates.SEK, USD: r.rates.USD };
-    localStorage.setItem('binder.rates', JSON.stringify(rates));
-  } catch { /* keep old rates */ }
+async function loadRates(force = false) {
+  if (!force && rates.live && Date.now() - rates.at < 12 * 3600e3) return;
+  for (const [url, pick] of RATE_SOURCES) {
+    try {
+      const r = pick(await getJSON(url, {}, 8000));
+      if (r?.SEK && r?.USD) {
+        rates = { at: Date.now(), SEK: r.SEK, USD: r.USD, live: true };
+        localStorage.setItem('binder.rates', JSON.stringify(rates));
+        return;
+      }
+    } catch { /* try the next source */ }
+  }
 }
 
-function valueEUR(snap) {
-  if (!snap) return null;
-  if (snap.eur != null) return snap.eur;
-  if (snap.usd != null && rates.USD) return snap.usd / rates.USD;
-  return null;
+function ratesText() {
+  const r = `1 EUR = ${rates.SEK.toFixed(2)} SEK, ${rates.USD.toFixed(2)} USD`;
+  return rates.live ? `${r}, updated ${relTime(rates.at)}.` : `${r}. Using approximate rates until live rates load.`;
 }
 
 function fmtMoney(amount, currency, signed = false) {
@@ -177,15 +194,21 @@ function fmt(eur, signed = false) {
   if (eur == null || Number.isNaN(eur)) return '–';
   const cur = settings.currency;
   if (cur === 'EUR') return fmtMoney(eur, 'EUR', signed);
-  const rate = rates[cur];
-  return rate ? fmtMoney(eur * rate, cur, signed) : fmtMoney(eur, 'EUR', signed);
+  return fmtMoney(eur * rates[cur], cur, signed);
 }
 
-function fmtUSD(usd) {
-  if (usd == null) return '–';
-  if (settings.currency === 'USD') return fmtMoney(usd, 'USD');
-  if (rates.USD) return `${fmt(usd / rates.USD)} (${fmtMoney(usd, 'USD')})`;
-  return fmtMoney(usd, 'USD');
+function entryEUR(e) {
+  if (!e) return null;
+  if (e.eur != null) return e.eur;
+  if (e.usd != null) return e.usd / rates.USD;
+  return null;
+}
+
+function fmtEntry(e) {
+  if (!e) return '–';
+  if (e.usd != null && settings.currency !== 'USD') return `${fmt(entryEUR(e))} (${fmtMoney(e.usd, 'USD')})`;
+  if (e.eur != null && settings.currency !== 'EUR') return `${fmt(e.eur)} (${fmtMoney(e.eur, 'EUR')})`;
+  return fmt(entryEUR(e));
 }
 
 /* ================= IndexedDB ================= */
@@ -260,6 +283,7 @@ const normName = s => String(s || '')
   .toLowerCase()
   .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   .replace(/[’‘`´]/g, "'")
+  .replace(/-/g, ' ')
   .replace(/\s+/g, ' ')
   .trim();
 
@@ -287,19 +311,29 @@ function similarity(a, b) {
   return hit / Math.max(A.size, B.size);
 }
 
-const SUFFIX_RX = /\b(ex|gx|v|vmax|vstar|v-union|lv\.?x|break|prime|legend|star)\b/gi;
+const IGNORE_WORDS = new Set(['ex', 'gx', 'vmax', 'vstar', 'union', 'break', 'prime', 'legend', 'star', 'team', 'dark', 'light',
+  'shining', 'radiant', 'galarian', 'alolan', 'hisuian', 'paldean', 'rocket', 'mega', 'primal', 'the']);
+
+function keyWord(name) {
+  const words = normName(name).replace(/'s\b/g, '').split(/[^a-z]+/).filter(w => w.length >= 3 && !IGNORE_WORDS.has(w));
+  return words.sort((a, b) => b.length - a.length)[0] || '';
+}
 
 async function findCandidates(d, limit = 6) {
   const name = String(d.name || '').trim();
   if (!name) return [];
   let briefs = await searchByName(name);
-  if (!briefs.length) {
-    const base = name.replace(SUFFIX_RX, '').replace(/\s+/g, ' ').trim();
-    if (base && base !== name) briefs = await searchByName(base);
+  const nn = normName(name);
+  if (!briefs.some(b => normName(b.name) === nn)) {
+    const word = keyWord(name);
+    if (word && word !== nn) {
+      const more = await searchByName(word);
+      const seen = new Set(briefs.map(b => b.id));
+      briefs = briefs.concat(more.filter(b => !seen.has(b.id)));
+    }
   }
   if (!briefs.length) return [];
 
-  const nn = normName(name);
   const exact = briefs.filter(b => normName(b.name) === nn);
   const pool = exact.length ? exact : briefs;
 
@@ -343,25 +377,22 @@ function defaultVariant(card, detected) {
   return list[0];
 }
 
-function pickPrices(card, variant) {
-  const p = card.pricing || {};
+function pickDex(card, variant) {
+  const p = card?.pricing || {};
   const cm = p.cardmarket;
   const tp = p.tcgplayer;
-  const hasNormal = !!card.variants?.normal;
+  const hasNormal = !!card?.variants?.normal;
   const foil = variant === 'reverse' || ((variant === 'holo' || variant === 'firstEdition') && hasNormal);
-
-  let eur = null, eur30 = null, eurLow = null;
+  const out = {};
   if (cm) {
     const read = useFoil => {
       const k = key => cm[useFoil ? `${key}-holo` : key];
-      return { trend: k('trend') ?? k('avg') ?? k('avg30') ?? null, avg30: k('avg30') ?? null, low: k('low') ?? null };
+      return { eur: k('trend') ?? k('avg') ?? k('avg30') ?? null, avg30: k('avg30') ?? null, low: k('low') ?? null };
     };
     let r = read(foil);
-    if (r.trend == null) r = read(!foil);
-    eur = r.trend; eur30 = r.avg30; eurLow = r.low;
+    if (r.eur == null) r = read(!foil);
+    if (r.eur != null) out.dexCm = { ...r, at: cm.updated ? Date.parse(cm.updated) : null };
   }
-
-  let usd = null, tpKey = null;
   if (tp) {
     const keys = Object.keys(tp).filter(k => tp[k] && typeof tp[k] === 'object');
     const prefs = {
@@ -370,15 +401,77 @@ function pickPrices(card, variant) {
       reverse: [/reverse/],
       firstEdition: [/^1st-edition-holofoil$/, /^1st-edition/],
     }[variant] || [];
-    tpKey = prefs.map(rx => keys.find(k => rx.test(k))).find(Boolean) || keys[0] || null;
-    if (tpKey) usd = tp[tpKey].marketPrice ?? tp[tpKey].midPrice ?? null;
+    const key = prefs.map(rx => keys.find(k => rx.test(k))).find(Boolean) || keys[0];
+    const usd = key ? tp[key].marketPrice ?? tp[key].midPrice ?? null : null;
+    if (usd != null) out.dexTp = { usd, key, at: tp.updated ? Date.parse(tp.updated) : null };
   }
-
-  return { eur, eur30, eurLow, usd, tpKey, cmAt: cm?.updated || null, tpAt: tp?.updated || null };
+  return out;
 }
 
-function snapshot(card, variant) {
-  return { at: Date.now(), ...pickPrices(card, variant) };
+const ptcgDate = s => (s ? Date.parse(String(s).replace(/\//g, '-')) || null : null);
+
+function pickPtcg(pc, variant) {
+  const out = {};
+  const prices = pc?.tcgplayer?.prices;
+  if (prices) {
+    const keys = Object.keys(prices).filter(k => prices[k]);
+    const prefs = {
+      normal: ['normal', 'unlimited', 'unlimitedNormal'],
+      holo: ['holofoil', 'unlimitedHolofoil'],
+      reverse: ['reverseHolofoil'],
+      firstEdition: ['1stEditionHolofoil', '1stEditionNormal', '1stEdition'],
+    }[variant] || [];
+    const key = prefs.find(k => prices[k]) || (keys.length === 1 ? keys[0] : null) || keys.find(k => k === 'holofoil') || keys[0];
+    const e = key ? prices[key] : null;
+    const usd = e ? e.market ?? e.mid ?? null : null;
+    if (usd != null) out.tp = { usd, low: e.low ?? null, key, at: ptcgDate(pc.tcgplayer.updatedAt), url: pc.tcgplayer.url || null };
+  }
+  const cp = pc?.cardmarket?.prices;
+  if (cp) {
+    const rev = variant === 'reverse';
+    const eur = rev ? cp.reverseHoloTrend || cp.reverseHoloSell : cp.trendPrice || cp.averageSellPrice;
+    if (eur) {
+      out.cm = {
+        eur,
+        avg30: (rev ? cp.reverseHoloAvg30 : cp.avg30) || null,
+        low: (rev ? cp.reverseHoloLow : cp.lowPrice) || null,
+        at: ptcgDate(pc.cardmarket.updatedAt),
+        url: pc.cardmarket.url || null,
+      };
+    }
+  }
+  return out;
+}
+
+function snapshot(dex, variant, pc) {
+  return { at: Date.now(), src: { ...(dex ? pickDex(dex, variant) : {}), ...(pc ? pickPtcg(pc, variant) : {}) } };
+}
+
+function sourcesOf(snap) {
+  if (!snap) return {};
+  if (snap.src) return snap.src;
+  const out = {};
+  if (snap.eur != null) out.dexCm = { eur: snap.eur, avg30: snap.eur30 ?? null, low: snap.eurLow ?? null, at: snap.cmAt ? Date.parse(snap.cmAt) : null };
+  if (snap.usd != null) out.dexTp = { usd: snap.usd, key: snap.tpKey, at: snap.tpAt ? Date.parse(snap.tpAt) : null };
+  return out;
+}
+
+function sourceOrder() {
+  return settings.basis === 'cardmarket' ? ['cm', 'dexCm', 'tp', 'dexTp'] : ['tp', 'cm', 'dexCm', 'dexTp'];
+}
+
+function chosenSource(snap, rec) {
+  const src = sourcesOf(snap);
+  const has = k => src[k] && entryEUR(src[k]) != null;
+  if (rec?.source && has(rec.source)) return rec.source;
+  const order = sourceOrder();
+  const fresh = k => has(k) && !(k === 'cm' && src.cm.at && Date.now() - src.cm.at > CM_STALE_MS);
+  return order.find(fresh) || order.find(has) || null;
+}
+
+function valueEUR(snap, rec) {
+  const k = chosenSource(snap, rec);
+  return k ? entryEUR(sourcesOf(snap)[k]) : null;
 }
 
 function pushHistory(rec, snap) {
@@ -390,10 +483,12 @@ function pushHistory(rec, snap) {
   if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
 }
 
-function applyCard(rec, card, variant) {
-  const snap = snapshot(card, variant);
+function applyCard(rec, card, variant, pc) {
+  const snap = snapshot(card, variant, pc);
   Object.assign(rec, {
     tcgdexId: card.id,
+    ptcgId: pc?.id || null,
+    ptcgChecked: true,
     name: card.name,
     setName: card.set?.name || '',
     setId: card.set?.id || '',
@@ -401,8 +496,10 @@ function applyCard(rec, card, variant) {
     setTotal: card.set?.cardCount?.official ?? null,
     rarity: card.rarity || '',
     image: card.image || '',
+    ptcgImg: pc?.images || null,
     variant,
     variants: availableVariants(card),
+    source: null,
     first: snap,
     last: snap,
     history: [snap],
@@ -410,13 +507,83 @@ function applyCard(rec, card, variant) {
   return rec;
 }
 
-function makeRecord(card, variant, photoId, detected) {
-  return applyCard({ id: uid(), photoId, addedAt: Date.now(), qty: 1, detected: detected || null }, card, variant);
+function makeRecord(card, variant, photoId, detected, pc) {
+  return applyCard({ id: uid(), photoId, addedAt: Date.now(), qty: 1, detected: detected || null }, card, variant, pc);
+}
+
+/* ================= pokemontcg.io ================= */
+
+function ptcgHeaders() {
+  return settings.ptcgKey ? { 'X-Api-Key': settings.ptcgKey } : {};
+}
+
+async function ptcgQuery(q, pageSize = 60) {
+  const url = `${PTCG}/cards?q=${encodeURIComponent(q)}&pageSize=${pageSize}&select=id,name,number,set,tcgplayer,cardmarket,images`;
+  const r = await getJSON(url, { headers: ptcgHeaders() }, 20000);
+  return Array.isArray(r.data) ? r.data : [];
+}
+
+const ptcgMatchCache = new Map();
+
+function findPtcg(card) {
+  if (!card) return Promise.resolve(null);
+  if (!ptcgMatchCache.has(card.id)) {
+    const p = findPtcgUncached(card).catch(() => { ptcgMatchCache.delete(card.id); return null; });
+    ptcgMatchCache.set(card.id, p);
+  }
+  return ptcgMatchCache.get(card.id);
+}
+
+async function findPtcgUncached(card) {
+  const local = String(card.localId ?? '');
+  if (!local) return null;
+  const nums = [...new Set([local, local.replace(/^([A-Za-z]*)0+(?=\d)/, '$1')])];
+  const numQ = `(${nums.map(n => `number:"${n}"`).join(' OR ')})`;
+  const total = card.set?.cardCount?.official;
+  const word = keyWord(card.name);
+  const nn = normName(card.name);
+
+  const score = r => {
+    const rn = normName(r.name);
+    if (word && !rn.includes(word)) return -1;
+    let sc = 0;
+    if (r.set?.id === card.set?.id) sc += 6;
+    if (total && r.set?.printedTotal === total) sc += 3;
+    sc += 4 * similarity(r.set?.name, card.set?.name);
+    if (rn === nn) sc += 2;
+    return sc;
+  };
+
+  const queries = [];
+  if (card.set?.id) queries.push(`set.id:"${card.set.id}" ${numQ}`);
+  if (total) queries.push(`set.printedTotal:${total} ${numQ}`);
+  if (word) queries.push(`name:"${card.name.replace(/"/g, '')}" ${numQ}`);
+
+  for (const q of queries) {
+    let res = [];
+    try { res = await ptcgQuery(q); } catch (e) { if (e.status === 429) throw e; continue; }
+    const best = res.map(r => ({ r, sc: score(r) })).filter(x => x.sc >= 3).sort((a, b) => b.sc - a.sc)[0];
+    if (best) return best.r;
+  }
+  return null;
+}
+
+async function ptcgFetchMany(ids) {
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 40) {
+    const chunk = ids.slice(i, i + 40);
+    const q = chunk.map(id => `id:"${id}"`).join(' OR ');
+    const res = await ptcgQuery(q, 250);
+    res.forEach(r => out.set(r.id, r));
+  }
+  return out;
 }
 
 const cardNumber = c => (c.setTotal ? `${c.localId}/${c.setTotal}` : c.localId);
 const imgSmall = url => (url ? `${url}/low.webp` : '');
 const imgLarge = url => (url ? `${url}/high.webp` : '');
+const recSmall = c => imgSmall(c.image) || c.ptcgImg?.small || '';
+const recLarge = c => imgLarge(c.image) || c.ptcgImg?.large || '';
 
 /* ================= Claude ================= */
 
@@ -484,11 +651,18 @@ async function loadCards() {
   state.cards = await dbAll('cards');
 }
 
+const cardValue = c => valueEUR(c.last, c);
+
+function firstValue(c) {
+  const k = chosenSource(c.last, c);
+  return k ? entryEUR(sourcesOf(c.first)[k]) : null;
+}
+
 function totals() {
   let total = 0, change = 0, priced = 0, oldest = null;
   for (const c of state.cards) {
-    const v = valueEUR(c.last);
-    const f = valueEUR(c.first);
+    const v = cardValue(c);
+    const f = firstValue(c);
     const q = c.qty || 1;
     if (v != null) { total += v * q; priced++; }
     if (v != null && f != null) change += (v - f) * q;
@@ -503,7 +677,7 @@ function sortedCards() {
   let list = state.cards;
   if (q) list = list.filter(c => normName(`${c.name} ${c.setName} ${c.localId}`).includes(q));
   list = [...list];
-  if (settings.sort === 'value') list.sort((a, b) => (valueEUR(b.last) ?? -1) - (valueEUR(a.last) ?? -1));
+  if (settings.sort === 'value') list.sort((a, b) => (cardValue(b) ?? -1) - (cardValue(a) ?? -1));
   else if (settings.sort === 'newest') list.sort((a, b) => b.addedAt - a.addedAt);
   else list.sort((a, b) => a.name.localeCompare(b.name) || a.setName.localeCompare(b.setName));
   return list;
@@ -535,9 +709,9 @@ function renderSummary() {
 }
 
 function pocketHTML(c) {
-  const v = valueEUR(c.last);
+  const v = cardValue(c);
   const foil = v != null && v >= FOIL_EUR;
-  const src = imgSmall(c.image);
+  const src = recSmall(c);
   return `<button class="pocket" type="button" data-id="${esc(c.id)}" aria-label="${esc(`${c.name}, ${c.setName} ${cardNumber(c)}, ${fmt(v)}`)}">
     <span class="card-img">${src ? `<img loading="lazy" src="${esc(src)}" alt="" onerror="this.remove()">` : `<img loading="lazy" data-photo="${esc(c.photoId)}" alt="">`}</span>
     <span class="pocket-name">${esc(c.name)}</span>
@@ -567,31 +741,67 @@ function render() {
 
 async function refreshPrices(force = false) {
   if (state.refreshing) return;
-  const due = state.cards.filter(c => c.tcgdexId && (force || !c.last || Date.now() - c.last.at > STALE_MS));
+  const due = state.cards.filter(c => c.tcgdexId && (force || !c.ptcgChecked || !c.last || Date.now() - c.last.at > STALE_MS));
   if (!due.length) {
     if (force) toast('Prices are up to date.');
     return;
   }
   state.refreshing = true;
   renderSummary();
-  let done = 0, failed = 0;
-  setMeta(`Updating prices 0 of ${due.length}`);
+  setMeta(`Updating prices for ${due.length} ${due.length === 1 ? 'card' : 'cards'}…`);
   await loadRates();
+
+  // TCGdex, one request per card
+  const dex = new Map();
   await runPool(due, 4, async rec => {
-    try {
-      const card = await getCard(rec.tcgdexId, true);
-      pushHistory(rec, snapshot(card, rec.variant));
-      if (card.image && !rec.image) rec.image = card.image;
-      await dbPut('cards', rec);
-    } catch {
-      failed++;
-    }
-    done++;
-    setMeta(`Updating prices ${done} of ${due.length}`);
+    try { dex.set(rec.id, await getCard(rec.tcgdexId, true)); } catch { /* keep old numbers */ }
   });
+
+  // pokemontcg.io: batch known ids, look up the rest
+  const ptcg = new Map();
+  let ptcgOk = true;
+  try {
+    const known = [...new Set(due.filter(r => r.ptcgId).map(r => r.ptcgId))];
+    if (known.length) (await ptcgFetchMany(known)).forEach((v, k) => ptcg.set(k, v));
+  } catch { ptcgOk = false; }
+  const unmatched = due.filter(r => !r.ptcgChecked);
+  await runPool(unmatched, 2, async rec => {
+    const card = dex.get(rec.id) || await getCard(rec.tcgdexId).catch(() => null);
+    if (!card) return;
+    try {
+      const pc = await findPtcgUncached(card);
+      rec.ptcgId = pc?.id || null;
+      if (pc) { ptcg.set(pc.id, pc); rec.ptcgImg = pc.images || null; }
+      rec.migrate = true;
+    } catch { ptcgOk = false; }
+  });
+
+  let failed = 0;
+  for (const rec of due) {
+    const card = dex.get(rec.id);
+    const pc = rec.ptcgId ? ptcg.get(rec.ptcgId) : null;
+    if (!card && !pc) { failed++; continue; }
+    const snap = snapshot(card, rec.variant, pc);
+    const old = sourcesOf(rec.last);
+    if (!card) { if (old.dexCm) snap.src.dexCm = old.dexCm; if (old.dexTp) snap.src.dexTp = old.dexTp; }
+    if (rec.ptcgId && !pc) { if (old.tp) snap.src.tp = old.tp; if (old.cm) snap.src.cm = old.cm; }
+    if (rec.migrate) {
+      rec.first = snap;
+      rec.history = [snap];
+      rec.last = snap;
+      rec.ptcgChecked = true;
+      delete rec.migrate;
+    } else {
+      pushHistory(rec, snap);
+    }
+    if (card?.image && !rec.image) rec.image = card.image;
+    try { await dbPut('cards', rec); } catch { failed++; }
+  }
+
   state.refreshing = false;
   render();
-  if (failed) toast(`${failed} ${failed === 1 ? 'price' : 'prices'} could not be updated. Try again later.`);
+  if (!ptcgOk) toast('TCGplayer prices could not be loaded right now. Showing the last known prices.');
+  else if (failed) toast(`${failed} ${failed === 1 ? 'price' : 'prices'} could not be updated. Try again later.`);
 }
 
 /* ================= Search widget (review + detail) ================= */
@@ -606,11 +816,10 @@ function searchFormHTML(name = '', number = '') {
 }
 
 function resultHTML(card) {
-  const v = valueEUR(snapshot(card, defaultVariant(card)));
   const num = card.set?.cardCount?.official ? `${card.localId}/${card.set.cardCount.official}` : card.localId;
   return `<button type="button" class="result" data-pick="${esc(card.id)}">
     ${card.image ? `<img loading="lazy" src="${esc(imgSmall(card.image))}" alt="" onerror="this.remove()">` : '<img alt="">'}
-    <span><b>${esc(card.name)}</b>${esc(card.set?.name || '')}, ${esc(num)}<br>${esc(fmt(v))}</span>
+    <span><b>${esc(card.name)}</b>${esc(card.set?.name || '')}, ${esc(num)}${card.rarity ? `<br>${esc(card.rarity)}` : ''}</span>
   </button>`;
 }
 
@@ -655,7 +864,14 @@ function rowHTML(job, row) {
   }
 
   const card = cand.card;
-  const v = valueEUR(snapshot(card, row.variant));
+  const ready = row.pcFor === card.id;
+  if (!ready) ensureRowPtcg(job, row);
+  const snap = snapshot(card, row.variant, ready ? row.pc : null);
+  const src = chosenSource(snap, null);
+  const v = valueEUR(snap, null);
+  const priceLine = ready
+    ? `${esc(fmt(v))}${src ? ` <span class="row-src">${esc(SOURCE_LABEL[src])}</span>` : ''}`
+    : '<span class="spinner"></span>Checking price…';
   const num = card.set?.cardCount?.official ? `${card.localId}/${card.set.cardCount.official}` : card.localId;
   const dupe = findDupe(card, row.variant);
   const variantOpts = availableVariants(card).map(k => `<option value="${k}"${k === row.variant ? ' selected' : ''}>${VARIANT_LABEL[k]}</option>`).join('');
@@ -664,11 +880,11 @@ function rowHTML(job, row) {
     : '';
 
   return `<div class="row${row.include ? '' : ' off'}" data-job="${job.id}" data-row="${row.id}">
-    <div class="row-img">${card.image ? `<img src="${esc(imgSmall(card.image))}" alt="" onerror="this.remove()">` : ''}</div>
+    <div class="row-img">${card.image || row.pc?.images?.small ? `<img src="${esc(imgSmall(card.image) || row.pc.images.small)}" alt="" onerror="this.remove()">` : ''}</div>
     <div class="row-body">
       <p class="row-name">${esc(card.name)}</p>
       <p class="row-sub">${esc(card.set?.name || '')}, ${esc(num)}${row.detected.graded ? ', graded' : ''}${row.detected.language && !/^en/i.test(row.detected.language) ? `, ${esc(row.detected.language)} card` : ''}</p>
-      <p class="row-price">${esc(fmt(v))}</p>
+      <p class="row-price">${priceLine}</p>
       <div class="row-controls">
         <select data-variant aria-label="Variant">${variantOpts}</select>
         ${candOpts}
@@ -679,6 +895,19 @@ function rowHTML(job, row) {
       <label class="check"><input type="checkbox" data-include${row.include ? ' checked' : ''}> ${dupe ? 'Add another copy' : 'Add to binder'}</label>
     </div>
   </div>`;
+}
+
+async function ensureRowPtcg(job, row) {
+  const card = row.cands[row.idx]?.card;
+  if (!card || row.pcLoading === card.id) return;
+  row.pcLoading = card.id;
+  const pc = await findPtcg(card);
+  if (row.cands[row.idx]?.card?.id !== card.id) return;
+  row.pc = pc;
+  row.pcFor = card.id;
+  row.pcLoading = null;
+  const rowEl = document.querySelector(`[data-job="${job.id}"][data-row="${row.id}"]`);
+  if (rowEl) rerenderRow(job, row, rowEl);
 }
 
 function jobHTML(job) {
@@ -757,7 +986,8 @@ async function handleFiles(fileList) {
         try { cands = await findCandidates(d); } catch { /* shown as no match */ }
         const card = cands[0]?.card;
         const variant = card ? defaultVariant(card, d.variant) : 'normal';
-        return { id: uid(), detected: d, cands, idx: 0, variant, include: !!card && !findDupe(card, variant), searching: false };
+        const pc = card ? await findPtcg(card) : null;
+        return { id: uid(), detected: d, cands, idx: 0, variant, include: !!card && !findDupe(card, variant), searching: false, pc, pcFor: card?.id || null };
       }));
       job.status = 'done';
     } catch (e) {
@@ -789,7 +1019,9 @@ async function saveReview() {
     const photoId = uid();
     await dbPut('photos', { id: photoId, blob: job.blob, addedAt: Date.now() });
     for (const r of fresh) {
-      const rec = makeRecord(r.cands[r.idx].card, r.variant, photoId, r.detected);
+      const card = r.cands[r.idx].card;
+      const pc = r.pcFor === card.id ? r.pc : await findPtcg(card);
+      const rec = makeRecord(card, r.variant, photoId, r.detected, pc);
       await dbPut('cards', rec);
       state.cards.push(rec);
       added++;
@@ -870,29 +1102,52 @@ function wireReview() {
 let detailId = null;
 let showPhoto = false;
 
-function sparkSVG(history) {
-  const pts = (history || []).map(s => valueEUR(s)).filter(v => v != null);
+function sparkSVG(c) {
+  const k = chosenSource(c.last, c);
+  const pts = (c.history || []).map(h => (k ? entryEUR(sourcesOf(h)[k]) : null)).filter(v => v != null);
   if (pts.length < 2) return '';
   const min = Math.min(...pts), max = Math.max(...pts);
   const span = max - min || 1;
   const d = pts.map((v, i) => `${i ? 'L' : 'M'}${(i / (pts.length - 1)) * 100},${38 - ((v - min) / span) * 36}`).join(' ');
-  return `<div class="spark" aria-label="Price history, ${pts.length} days">
+  return `<div class="spark" aria-label="Price history, ${pts.length} checks">
     <svg viewBox="0 0 100 40" preserveAspectRatio="none"><path d="${d}"/></svg>
     <p class="hint">Lowest ${esc(fmt(min))}, highest ${esc(fmt(max))} over ${pts.length} checks</p>
   </div>`;
 }
 
+const TP_KEY_LABEL = k => String(k || '')
+  .replace(/^1stEdition/, '1st edition ').replace(/^unlimited/, 'unlimited ')
+  .replace(/reverseHolofoil|reverse-holofoil|reverse/i, 'reverse holo')
+  .replace(/holofoil|holo$/i, 'holo')
+  .replace(/-/g, ' ').trim();
+
+function sourceDetail(k, e) {
+  const bits = [];
+  if ((k === 'tp' || k === 'dexTp') && e.key) bits.push(TP_KEY_LABEL(e.key));
+  if (e.avg30 != null) bits.push(`30-day avg ${fmt(e.avg30)}`);
+  if (e.low != null) bits.push(`lowest ${e.usd != null ? fmtMoney(e.low, 'USD') : fmt(e.low)}`);
+  if (e.at) bits.push(`updated ${relTime(e.at)}`);
+  return bits.join(', ');
+}
+
 async function renderDetail() {
   const c = state.cards.find(x => x.id === detailId);
   if (!c) return;
-  const v = valueEUR(c.last);
-  const f = valueEUR(c.first);
+  const v = cardValue(c);
+  const f = firstValue(c);
   const diff = v != null && f != null ? v - f : null;
-  const s = c.last || {};
+  const src = sourcesOf(c.last);
+  const chosen = chosenSource(c.last, c);
+  const keys = ['tp', 'cm', 'dexCm', 'dexTp'].filter(k => src[k] && entryEUR(src[k]) != null);
+  const vals = keys.map(k => entryEUR(src[k]));
+  const disagree = vals.length > 1 && Math.max(...vals) > 2 && Math.max(...vals) / Math.max(Math.min(...vals), 0.01) > 3;
   const photo = await photoURL(c.photoId);
   const usePhoto = showPhoto && photo;
-  const imgSrc = usePhoto ? photo : imgLarge(c.image) || photo || '';
+  const official = recLarge(c);
+  const imgSrc = usePhoto ? photo : official || photo || '';
   const q = encodeURIComponent(`${c.name} ${c.localId}`);
+  const tpUrl = src.tp?.url || `https://www.tcgplayer.com/search/pokemon/product?q=${q}`;
+  const cmUrl = src.cm?.url || `https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(c.name)}`;
   const variantOpts = (c.variants || ['normal']).map(k => `<option value="${k}"${k === c.variant ? ' selected' : ''}>${VARIANT_LABEL[k]}</option>`).join('');
 
   $('#detailTitle').textContent = c.name;
@@ -900,7 +1155,7 @@ async function renderDetail() {
     <div class="detail-top">
       <div>
         <div class="detail-img">${imgSrc ? `<img class="${usePhoto ? '' : 'official'}" src="${esc(imgSrc)}" alt="${usePhoto ? 'Your photo' : esc(c.name)}" onerror="this.remove()">` : ''}</div>
-        ${photo && c.image ? `<button type="button" class="text-btn img-toggle" data-toggle-photo>${usePhoto ? 'Show card image' : 'Show your photo'}</button>` : ''}
+        ${photo && official ? `<button type="button" class="text-btn img-toggle" data-toggle-photo>${usePhoto ? 'Show card image' : 'Show your photo'}</button>` : ''}
       </div>
       <div>
         <p class="detail-value">${esc(fmt(v))}</p>
@@ -910,16 +1165,18 @@ async function renderDetail() {
       </div>
     </div>
 
-    <table class="prices">
-      <caption>Current prices</caption>
-      <tr><th scope="row">Cardmarket trend</th><td>${esc(fmt(s.eur))}</td></tr>
-      <tr><th scope="row">Cardmarket 30-day average</th><td>${esc(fmt(s.eur30))}</td></tr>
-      <tr><th scope="row">Cardmarket lowest listing</th><td>${esc(fmt(s.eurLow))}</td></tr>
-      <tr><th scope="row">TCGplayer market</th><td>${esc(fmtUSD(s.usd))}</td></tr>
-    </table>
-    <p class="hint">Checked ${esc(relTime(s.at))}. Added ${esc(new Date(c.addedAt).toLocaleDateString('sv-SE'))} at ${esc(fmt(f))}.</p>
+    <p class="section-title">Prices</p>
+    ${keys.length ? `<div class="sources" role="radiogroup" aria-label="Price used for this card's value">
+      ${keys.map(k => `<button type="button" class="source${k === chosen ? ' on' : ''}" role="radio" aria-checked="${k === chosen}" data-source="${k}">
+        <span class="source-name">${esc(SOURCE_LABEL[k])}<small>${esc(sourceDetail(k, src[k]))}</small></span>
+        <span class="source-val">${esc(fmtEntry(src[k]))}</span>
+      </button>`).join('')}
+    </div>` : '<p class="hint">No prices found for this card yet.</p>'}
+    ${disagree ? '<p class="notice">These sources disagree a lot for this card. Compare with PriceCharting and tap the price that looks right.</p>' : ''}
+    <p class="hint">${c.source ? 'You picked this price for the card. <button type="button" class="text-btn" data-source="auto">Go back to automatic</button>' : 'Tap a price to use it for this card’s value.'}</p>
 
-    ${sparkSVG(c.history)}
+    ${sparkSVG(c)}
+    <p class="hint">Added ${esc(new Date(c.addedAt).toLocaleDateString('sv-SE'))}${f != null ? ` at ${esc(fmt(f))}` : ''}. Checked ${esc(relTime(c.last?.at))}.</p>
 
     <div class="detail-controls">
       <div class="field" style="margin:0">
@@ -938,8 +1195,8 @@ async function renderDetail() {
 
     <div class="links">
       <a class="btn small" href="https://www.pricecharting.com/search-products?type=prices&q=${q}" target="_blank" rel="noopener">PriceCharting</a>
-      <a class="btn small" href="https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(c.name)}" target="_blank" rel="noopener">Cardmarket</a>
-      <a class="btn small" href="https://www.tcgplayer.com/search/pokemon/product?q=${q}" target="_blank" rel="noopener">TCGplayer</a>
+      <a class="btn small" href="${esc(cmUrl)}" target="_blank" rel="noopener">Cardmarket</a>
+      <a class="btn small" href="${esc(tpUrl)}" target="_blank" rel="noopener">TCGplayer</a>
     </div>
 
     <p class="section-title">Wrong card?</p>
@@ -976,10 +1233,15 @@ function wireDetail() {
       const n = Math.max(1, (c.qty || 1) + Number(e.target.closest('[data-qty]').dataset.qty));
       c.qty = n;
       await saveDetail(c);
+    } else if (e.target.closest('[data-source]')) {
+      const k = e.target.closest('[data-source]').dataset.source;
+      c.source = k === 'auto' ? null : k;
+      await saveDetail(c);
     } else if (e.target.closest('[data-pick]')) {
       const card = cardCache.get(e.target.closest('[data-pick]').dataset.pick);
       if (!card) return;
-      applyCard(c, card, defaultVariant(card, c.detected?.variant));
+      const pc = await findPtcg(card);
+      applyCard(c, card, defaultVariant(card, c.detected?.variant), pc);
       await saveDetail(c);
       toast('Card updated.');
     } else if (e.target.closest('[data-delete]')) {
@@ -1003,7 +1265,10 @@ function wireDetail() {
     if (!c) return;
     try {
       const card = await getCard(c.tcgdexId, true);
-      applyCard(c, card, e.target.value);
+      let pc = null;
+      if (c.ptcgId) pc = (await ptcgFetchMany([c.ptcgId]).catch(() => new Map())).get(c.ptcgId) || null;
+      else pc = await findPtcg(card);
+      applyCard(c, card, e.target.value, pc);
       await saveDetail(c);
     } catch {
       toast('Could not load prices for that variant. Try again.');
@@ -1028,7 +1293,11 @@ function openSettings(notice) {
   $('#toggleKey').textContent = 'Show';
   $('#model').value = settings.model;
   $('#currency').value = settings.currency;
+  $('#basis').value = settings.basis;
+  $('#ptcgKey').value = settings.ptcgKey || '';
+  $('#ratesInfo').textContent = ratesText();
   updateStorageInfo();
+  loadRates().then(() => { $('#ratesInfo').textContent = ratesText(); render(); });
   $('#settings').showModal();
 }
 
@@ -1094,11 +1363,19 @@ function wireSettings() {
     $('#toggleKey').textContent = show ? 'Hide' : 'Show';
   });
   model.addEventListener('change', e => { settings.model = e.target.value; saveSettings(); });
-  $('#currency').addEventListener('change', async e => {
+  $('#currency').addEventListener('change', e => {
     settings.currency = e.target.value;
     saveSettings();
-    await loadRates();
     render();
+  });
+  $('#basis').addEventListener('change', e => {
+    settings.basis = e.target.value;
+    saveSettings();
+    render();
+  });
+  $('#ptcgKey').addEventListener('change', e => {
+    settings.ptcgKey = e.target.value.trim();
+    saveSettings();
   });
   $('#exportBtn').addEventListener('click', () => exportData().catch(() => toast('Backup failed.')));
   $('#importInput').addEventListener('change', e => {
