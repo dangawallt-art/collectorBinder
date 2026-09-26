@@ -111,6 +111,15 @@
       <div class="field">
         <label for="model">Model for reading cards</label>
         <select id="model"></select>
+        <label class="check"><input type="checkbox" id="confirmMatches"> Let Claude double-check unsure matches against catalog images</label>
+      </div>
+
+      <div class="field">
+        <label for="lookupModel">Model for reading PriceCharting and searching the web</label>
+        <select id="lookupModel"></select>
+        <label class="check"><input type="checkbox" id="pcAuto"> Get ungraded to PSA 10 prices automatically for new cards</label>
+        <p class="hint" id="pcAllInfo"></p>
+        <div class="btn-row"><button type="button" class="btn" id="pcAllBtn">Get PriceCharting prices for all cards</button></div>
       </div>
 
       <div class="field">
@@ -126,8 +135,9 @@
       <div class="field">
         <label for="basis">Base card values on</label>
         <select id="basis">
-          <option value="tcgplayer">TCGplayer (US market, most reliable matching)</option>
+          <option value="pricecharting">PriceCharting ungraded (eBay sales)</option>
           <option value="cardmarket">Cardmarket (European market)</option>
+          <option value="tcgplayer">TCGplayer (US market)</option>
         </select>
         <p class="hint">You can also pick a different price for a single card in its detail view.</p>
       </div>
@@ -149,6 +159,16 @@
           </label>
         </div>
         <p class="hint" id="storageInfo"></p>
+      </div>
+
+      <div class="field">
+        <span class="label">Matching problems</span>
+        <p class="hint" id="logInfo"></p>
+        <p class="hint">Cards that were not found or that you corrected by hand are saved here. Copy the list and paste it to Claude to improve the matching.</p>
+        <div class="btn-row">
+          <button type="button" class="btn" id="copyLogBtn">Copy list</button>
+          <button type="button" class="btn" id="clearLogBtn">Clear</button>
+        </div>
       </div>
 
       <div class="field">

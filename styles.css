@@ -626,3 +626,29 @@ select { padding-right: 8px; }
 .source-val { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; font-size: 0.9375rem; }
 .row-src { font-weight: 400; font-size: 0.8125rem; color: var(--muted); margin-left: 4px; }
 .notice + .hint, .sources + .hint { margin-top: 4px; }
+
+/* ---------- Review extras ---------- */
+
+.read-as { font-size: 0.8125rem; color: var(--muted); }
+.search input[name="q"] { flex: 1 1 200px; }
+.field .check { margin-top: 10px; font-size: 0.9375rem; }
+
+/* ---------- Ungraded to PSA 10 ladder ---------- */
+
+.ladder { display: flex; flex-direction: column; gap: 7px; margin: 8px 0 6px; }
+.rung {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 0.9375rem;
+}
+.rung-label { color: var(--muted); white-space: nowrap; }
+.rung-label small { font-size: 0.75rem; color: var(--accent); font-weight: 600; margin-left: 2px; }
+.rung-bar { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+.rung-bar span { display: block; height: 100%; border-radius: 5px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.rung:last-child .rung-bar span { background: var(--foil); }
+.rung.mine .rung-label { color: var(--ink); font-weight: 600; }
+.rung.mine .rung-bar span { background: var(--accent); }
+.rung-val { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; min-width: 5.5em; }
+.source:disabled { cursor: default; opacity: 1; }

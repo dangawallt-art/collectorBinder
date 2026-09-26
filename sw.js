@@ -1,4 +1,4 @@
-const CACHE = 'binder-v2';
+const CACHE = 'binder-v3';
 const SHELL = [
   './',
   './index.html',
